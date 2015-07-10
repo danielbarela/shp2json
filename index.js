@@ -43,23 +43,23 @@ module.exports = function (inStream) {
             if (files.length === 0) {
                 this('no .shp files found in the archive');
             }
-            else if (files.length > 1) {
-                this('multiple .shp files found in the archive,'
-                    + ' expecting a single file')
-            }
             else {
-                var shp = gdal.open(files[0]);
-                var layerCount = shp.layers.count();
+                var fileCount = files.length;
 
                 var before = '{"type": "FeatureCollection","features": [\n';
                 var after = '\n]}\n';
                 var started = false;
-                var currentLayer, currentFeature, currentTransformation;
-                var nextLayer = 0;
+                var currentLayer, currentFeature, currentTransformation, shp;
+                var nextLayer, layerCount, nextFile = 0;
 
                 var to = gdal.SpatialReference.fromEPSG(4326);
 
                 function getNextLayer() {
+                  if (nextLayer === layerCount) {
+                    shp = gdal.open(files[nextFile++]);
+                    layerCount = shp.layers.count();
+                    nextLayer = 0;
+                  }
                   currentLayer = shp.layers.get(nextLayer++);
                   var srs = currentLayer.srs || gdal.SpatialReference.fromEPSG(4326);
                   currentTransformation = new gdal.CoordinateTransformation(srs, to);
@@ -75,7 +75,7 @@ module.exports = function (inStream) {
                       var feature = currentLayer.features.next();
                       if (!feature) {
                           // end stream
-                          if (nextLayer === layerCount) {
+                          if (nextFile === fileCount) {
                               // push remaining output and end
                               layerStream.push(out);
                               layerStream.push(after);
@@ -87,14 +87,23 @@ module.exports = function (inStream) {
 
                       try {
                           var geom = feature.getGeometry();
+                          if (!geom) {
+                            return writeNextFeature();
+                          }
                       } catch (e) {
                           return writeNextFeature();
                       }
 
                       geom.transform(currentTransformation);
                       var geojson = geom.toJSON();
-                      var fields = feature.fields.toJSON();
-                      var featStr = '{"type": "Feature", "properties": ' + fields + ',"geometry": ' + geojson + '}';
+                      var fields = {};
+                      if (fileCount > 1) {
+                        fields.shapefile = path.basename(files[nextFile]);
+                      }
+                      feature.fields.forEach(function(value, key) {
+                        fields[key] = value;
+                      });
+                      var featStr = '{"type": "Feature", "properties": ' + JSON.stringify(fields) + ',"geometry": ' + geojson + '}';
 
                       if (started) {
                           featStr = ',\n' + featStr;
